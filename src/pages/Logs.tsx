@@ -26,6 +26,13 @@ function formatTimestamp(value: string) {
   });
 }
 
+function formatRisk(score: number) {
+  if (!Number.isFinite(score)) return "n/a";
+  const clamped = Math.max(0, Math.min(1, score));
+  const percent = (clamped * 100).toFixed(0);
+  return `${clamped.toFixed(2)} (${percent}%)`;
+}
+
 function decisionVariant(decision: string) {
   const lowered = decision.toLowerCase();
   if (lowered.includes("block")) return "destructive" as const;
@@ -147,7 +154,7 @@ export default function Logs() {
                               {log.decision}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-xs">{log.risk_score.toFixed(2)}</TableCell>
+                          <TableCell className="text-xs">{formatRisk(log.risk_score)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
