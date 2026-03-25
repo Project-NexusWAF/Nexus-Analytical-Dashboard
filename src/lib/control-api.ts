@@ -12,6 +12,14 @@ export interface StatsSnapshot {
   config_version: number;
   ml_circuit_state: string;
   healthy_upstreams: number;
+  upstreams: UpstreamStatusView[];
+}
+
+export interface UpstreamStatusView {
+  name: string;
+  addr: string;
+  status: string;
+  enabled: boolean;
 }
 
 export interface AttackLogEntry {
@@ -33,6 +41,32 @@ export interface PaginatedLogs {
   page: number;
   limit: number;
   items: AttackLogEntry[];
+}
+
+export interface RulesPayload {
+  found: boolean;
+  version: string;
+  content: string;
+  source: string;
+}
+
+export interface RuleVersion {
+  id: number;
+  version: string;
+  created_at: string;
+  active: boolean;
+}
+
+export interface ConfigSnapshot {
+  version: number;
+  config: Record<string, unknown>;
+}
+
+export interface ConfigLogEntry {
+  timestamp: string;
+  version: number;
+  status: string;
+  message: string;
 }
 
 const API_BASE = (import.meta.env.VITE_CONTROL_API_BASE_URL || "").trim();
@@ -71,4 +105,20 @@ export async function fetchStatsSnapshot(): Promise<StatsSnapshot> {
 export async function fetchRecentLogs(limit = 300): Promise<AttackLogEntry[]> {
   const logs = await fetchJson<PaginatedLogs>(`/api/logs?page=1&limit=${limit}`);
   return logs.items;
+}
+
+export async function fetchRulesSnapshot(): Promise<RulesPayload> {
+  return fetchJson<RulesPayload>("/api/rules");
+}
+
+export async function fetchRuleVersions(): Promise<RuleVersion[]> {
+  return fetchJson<RuleVersion[]>("/api/rules/versions");
+}
+
+export async function fetchConfigSnapshot(): Promise<ConfigSnapshot> {
+  return fetchJson<ConfigSnapshot>("/api/config");
+}
+
+export async function fetchConfigLogs(): Promise<ConfigLogEntry[]> {
+  return fetchJson<ConfigLogEntry[]>("/api/config/logs");
 }

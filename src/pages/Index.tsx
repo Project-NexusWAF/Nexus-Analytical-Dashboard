@@ -1,14 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Cell, PieChart, Pie,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+  PieChart,
+  Pie,
+  LabelList,
 } from "recharts";
 import { Activity, Shield, Zap, Globe, Brain, AlertTriangle } from "lucide-react";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { ChartCard } from "@/components/dashboard/ChartCard";
 import { StatusIndicator } from "@/components/dashboard/StatusIndicator";
+import { Topbar } from "@/components/Topbar";
 import {
   AttackLogEntry,
+  StatsSnapshot,
   fetchHealthSnapshot,
   fetchRecentLogs,
   fetchStatsSnapshot,
@@ -24,6 +37,9 @@ const tooltipStyle = {
   labelStyle: { color: "hsl(210, 20%, 92%)" },
 };
 
+const chartLabelColor = "hsl(210, 20%, 92%)";
+const RADIAN = Math.PI / 180;
+
 function formatNumber(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
@@ -33,6 +49,26 @@ function formatNumber(n: number): string {
 function toMinuteLabel(iso: string): string {
   const date = new Date(iso);
   return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+function decisionLabel({ cx, cy, midAngle, outerRadius, payload, value }: any) {
+  const radius = outerRadius + 16;
+  const x = cx + radius * Math.cos(-midAngle * RADIAN);
+  const y = cy + radius * Math.sin(-midAngle * RADIAN);
+  const status = payload?.status ?? "unknown";
+  return (
+    <text
+      x={x}
+      y={y}
+      textAnchor={x > cx ? "start" : "end"}
+      dominantBaseline="central"
+      fill={chartLabelColor}
+      fontSize={10}
+      fontFamily="JetBrains Mono"
+    >
+      {`${status}: ${formatNumber(Number(value))}`}
+    </text>
+  );
 }
 
 function summarizeLogs(logs: AttackLogEntry[]) {
@@ -95,15 +131,7 @@ export default function Index() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [health, setHealth] = useState<{ ok: boolean; status: string; config_version: number } | null>(null);
-  const [stats, setStats] = useState<{
-    requests_total: number;
-    blocked_total: number;
-    rate_limited_total: number;
-    pipeline_layers: string[];
-    config_version: number;
-    ml_circuit_state: string;
-    healthy_upstreams: number;
-  } | null>(null);
+  const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [logs, setLogs] = useState<AttackLogEntry[]>([]);
 
   const logSummary = useMemo(() => summarizeLogs(logs), [logs]);
@@ -117,6 +145,7 @@ export default function Index() {
         rateLimitedTotal: 0,
         pipelineLayerCount: 0,
         healthyUpstreams: 0,
+        totalUpstreams: 0,
       };
     }
 
@@ -131,6 +160,7 @@ export default function Index() {
       rateLimitedTotal: stats.rate_limited_total,
       pipelineLayerCount: stats.pipeline_layers.length,
       healthyUpstreams: stats.healthy_upstreams,
+      totalUpstreams: stats.upstreams.filter((u) => u.enabled).length,
     };
   }, [stats]);
 
@@ -145,13 +175,37 @@ export default function Index() {
   );
 
   const upstreams = useMemo(
-    () => Array.from({ length: stats?.healthy_upstreams || 0 }, (_, index) => ({
-      upstream: `upstream-${index + 1}`,
-      health: 1,
-      latency: 0,
-    })),
+    () =>
+      (stats?.upstreams || []).map((u) => {
+        const normalized = u.status.toLowerCase();
+        const status =
+          normalized === "healthy"
+            ? "healthy"
+            : normalized === "unhealthy"
+            ? "unhealthy"
+            : normalized === "disabled"
+            ? "disabled"
+            : "unknown";
+        return {
+          upstream: u.name || u.addr,
+          status,
+        };
+      }),
     [stats]
   );
+
+  const upstreamVariant =
+    derivedSummary.totalUpstreams > 0 &&
+    derivedSummary.healthyUpstreams === derivedSummary.totalUpstreams
+      ? "success"
+      : derivedSummary.totalUpstreams > 0
+      ? "warning"
+      : "default";
+
+  const upstreamValue =
+    derivedSummary.totalUpstreams > 0
+      ? `${derivedSummary.healthyUpstreams}/${derivedSummary.totalUpstreams}`
+      : `${derivedSummary.healthyUpstreams}`;
 
   useEffect(() => {
     let mounted = true;
@@ -190,37 +244,30 @@ export default function Index() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-background p-6">
-      {/* Header */}
-      <div className="mb-8 flex items-center gap-3">
-        <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10 text-primary">
-          <Shield className="h-5 w-5" />
-        </div>
-        <div>
-          <h1 className="text-xl font-bold font-display text-foreground tracking-tight">NEXUS DASHBOARD</h1>
-          <p className="text-xs text-muted-foreground">Real-time observability · Auto-refreshing every 5s</p>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          <span className="h-2 w-2 rounded-full bg-primary metric-pulse" />
-          <span className="text-xs text-muted-foreground font-display">LIVE</span>
-        </div>
-      </div>
+    <div className="min-h-screen bg-background">
+      <Topbar />
+      <div className="p-6">
+        {error && (
+          <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+            Failed to load backend data: {error}
+          </div>
+        )}
 
-      {error && (
-        <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-          Failed to load backend data: {error}
+        {/* Summary Cards */}
+        <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+          <MetricCard title="Total Requests" value={formatNumber(derivedSummary.totalRequests)} icon={<Activity className="h-4 w-4" />} variant="success" />
+          <MetricCard title="Rate Limited" value={formatNumber(derivedSummary.rateLimitedTotal)} icon={<Zap className="h-4 w-4" />} variant="warning" />
+          <MetricCard title="Blocked %" value={`${derivedSummary.blockedPercent}%`} icon={<Shield className="h-4 w-4" />} />
+          <MetricCard title="Config Version" value={health?.config_version || stats?.config_version || 0} icon={<Globe className="h-4 w-4" />} />
+          <MetricCard title="ML Circuit" value={stats?.ml_circuit_state || "unknown"} icon={<Brain className="h-4 w-4" />} subtitle="control plane" />
+          <MetricCard
+            title="Upstreams"
+            value={upstreamValue}
+            subtitle="healthy"
+            icon={<AlertTriangle className="h-4 w-4" />}
+            variant={upstreamVariant}
+          />
         </div>
-      )}
-
-      {/* Summary Cards */}
-      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-        <MetricCard title="Total Requests" value={formatNumber(derivedSummary.totalRequests)} icon={<Activity className="h-4 w-4" />} variant="success" />
-        <MetricCard title="Rate Limited" value={formatNumber(derivedSummary.rateLimitedTotal)} icon={<Zap className="h-4 w-4" />} variant="warning" />
-        <MetricCard title="Blocked %" value={`${derivedSummary.blockedPercent}%`} icon={<Shield className="h-4 w-4" />} />
-        <MetricCard title="Config Version" value={health?.config_version || stats?.config_version || 0} icon={<Globe className="h-4 w-4" />} />
-        <MetricCard title="ML Circuit" value={stats?.ml_circuit_state || "unknown"} icon={<Brain className="h-4 w-4" />} subtitle="control plane" />
-        <MetricCard title="Upstreams" value={derivedSummary.healthyUpstreams} subtitle="healthy" icon={<AlertTriangle className="h-4 w-4" />} variant="success" />
-      </div>
 
       {/* Row 1: Duration + Active Connections */}
       <div className="mb-6 grid gap-4 lg:grid-cols-2">
@@ -265,15 +312,28 @@ export default function Index() {
       <div className="mb-6 grid gap-4 lg:grid-cols-2">
         <ChartCard title="Blocked Requests" subtitle="By block reason from logs">
           <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={logSummary.blocked} layout="vertical">
+            <BarChart data={logSummary.blocked} layout="vertical" margin={{ left: 4, right: 40 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
               <XAxis type="number" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <YAxis dataKey="reason" type="category" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} width={100} />
+              <YAxis dataKey="reason" type="category" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} width={120} />
               <Tooltip {...tooltipStyle} />
-              <Bar dataKey="count" radius={[0, 4, 4, 0]}>
+              <Bar
+                dataKey="count"
+                radius={[0, 6, 6, 0]}
+                barSize={16}
+                background={{ fill: "hsl(220, 12%, 12%)" }}
+              >
                 {logSummary.blocked.map((_, i) => (
                   <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                 ))}
+                <LabelList
+                  dataKey="count"
+                  position="right"
+                  formatter={(value: number) => formatNumber(value)}
+                  fill={chartLabelColor}
+                  fontSize={10}
+                  fontFamily="JetBrains Mono"
+                />
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -282,7 +342,19 @@ export default function Index() {
         <ChartCard title="Requests by Decision" subtitle="Distribution across gateway decisions">
           <ResponsiveContainer width="100%" height={220}>
             <PieChart>
-              <Pie data={logSummary.decisions} dataKey="count" nameKey="status" cx="50%" cy="50%" innerRadius={50} outerRadius={85} paddingAngle={2} strokeWidth={0}>
+              <Pie
+                data={logSummary.decisions}
+                dataKey="count"
+                nameKey="status"
+                cx="50%"
+                cy="50%"
+                innerRadius={50}
+                outerRadius={78}
+                paddingAngle={2}
+                strokeWidth={0}
+                labelLine={{ stroke: "hsl(210, 15%, 55%)" }}
+                label={decisionLabel}
+              >
                 {logSummary.decisions.map((_, i) => (
                   <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                 ))}
@@ -339,7 +411,7 @@ export default function Index() {
         <ChartCard title="Upstream Health" subtitle="Service status and latency">
           <div className="space-y-2">
             {upstreams.map((u) => (
-              <StatusIndicator key={u.upstream} name={u.upstream} healthy={u.health === 1.0} />
+              <StatusIndicator key={u.upstream} name={u.upstream} status={u.status} />
             ))}
             {!upstreams.length && <p className="text-sm text-muted-foreground">No upstream status available</p>}
           </div>
@@ -363,11 +435,10 @@ export default function Index() {
               <div key={r.rule_id} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-3 py-2">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-display text-card-foreground">{r.rule_id}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-display uppercase ${
-                    r.action === "block" ? "bg-destructive/10 text-destructive" :
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-display uppercase ${r.action === "block" ? "bg-destructive/10 text-destructive" :
                     r.action === "challenge" ? "bg-warning/10 text-warning" :
-                    "bg-info/10 text-info"
-                  }`}>{r.action}</span>
+                      "bg-info/10 text-info"
+                    }`}>{r.action}</span>
                 </div>
                 <span className="text-xs font-display text-muted-foreground">{formatNumber(r.count)}</span>
               </div>
@@ -378,6 +449,7 @@ export default function Index() {
       </div>
 
       {loading && <p className="text-sm text-muted-foreground">Loading backend metrics...</p>}
+      </div>
     </div>
   );
 }
