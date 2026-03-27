@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ApiErrorAlert } from "@/components/ApiErrorAlert";
 import { Topbar } from "@/components/Topbar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -46,11 +47,7 @@ export default function Config() {
     <div className="min-h-screen bg-background">
       <Topbar />
       <div className="p-6">
-        {error && (
-          <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            Failed to load config: {error}
-          </div>
-        )}
+        {error && <ApiErrorAlert className="mb-6" title="Configuration unavailable" message={error} />}
 
         <Card>
           <CardHeader>

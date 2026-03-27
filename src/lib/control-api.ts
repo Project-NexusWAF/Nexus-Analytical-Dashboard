@@ -50,6 +50,30 @@ export interface RulesPayload {
   source: string;
 }
 
+export interface GpsCandidateView {
+  id: string;
+  name: string;
+  description: string;
+  kind: string;
+  signal: string;
+  malicious_hits: number;
+  benign_hits: number;
+}
+
+export interface SynthesizeRulesBody {
+  lookback_hours?: number;
+  min_hits?: number;
+  max_rules?: number;
+  apply?: boolean;
+}
+
+export interface SynthesizeRulesResponse {
+  version: string;
+  applied: boolean;
+  candidates: GpsCandidateView[];
+  content: string;
+}
+
 export interface RuleVersion {
   id: number;
   version: string;
@@ -59,7 +83,57 @@ export interface RuleVersion {
 
 export interface ConfigSnapshot {
   version: number;
-  config: Record<string, unknown>;
+  config: ControlConfigSnapshot;
+}
+
+export type SlackSeverity = "low" | "medium" | "high" | "critical";
+
+export interface TlsConfigSnapshot {
+  enabled: boolean;
+  cert_path: string;
+  key_path: string;
+  certbot: CertbotConfigSnapshot;
+}
+
+export interface CertbotConfigSnapshot {
+  enabled: boolean;
+  certbot_bin: string;
+  live_dir: string;
+  cert_name: string;
+  domain: string;
+  extra_domains: string[];
+  email: string;
+  webroot_dir: string;
+  challenge_addr: string;
+  renew_interval_hours: number;
+  staging: boolean;
+}
+
+export interface GatewayConfigSnapshot extends Record<string, unknown> {
+  tls: TlsConfigSnapshot;
+}
+
+export interface GpsConfigSnapshot {
+  enabled: boolean;
+  default_lookback_hours: number;
+  min_hits: number;
+  max_rules: number;
+}
+
+export interface SlackConfigSnapshot {
+  enabled: boolean;
+  webhook_url: string;
+  channel: string;
+  username: string;
+  icon_emoji: string;
+  min_severity: SlackSeverity;
+  include_rate_limits: boolean;
+}
+
+export interface ControlConfigSnapshot extends Record<string, unknown> {
+  gateway: GatewayConfigSnapshot;
+  gps: GpsConfigSnapshot;
+  slack: SlackConfigSnapshot;
 }
 
 export interface ConfigLogEntry {
@@ -77,21 +151,55 @@ function apiUrl(path: string): string {
   return `${API_BASE.replace(/\/$/, "")}${path}`;
 }
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const headers: HeadersInit = {
-    Accept: "application/json",
-  };
+function formatErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) return "";
+
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown; message?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return parsed.message.trim();
+    }
+  } catch {
+    return trimmed;
+  }
+
+  return trimmed;
+}
+
+async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+
+  if (init.body && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
   if (API_TOKEN) {
-    headers.Authorization = `Bearer ${API_TOKEN}`;
+    headers.set("Authorization", `Bearer ${API_TOKEN}`);
   }
 
-  const response = await fetch(apiUrl(path), { headers });
+  const response = await fetch(apiUrl(path), { ...init, headers });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`API ${path} failed (${response.status}): ${body || response.statusText}`);
+    const detail = formatErrorBody(body) || response.statusText;
+    throw new Error(`API ${path} failed (${response.status}): ${detail}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function fetchJson<T>(path: string): Promise<T> {
+  return requestJson<T>(path);
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  return requestJson<T>(path, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function fetchHealthSnapshot(): Promise<HealthSnapshot> {
@@ -121,4 +229,10 @@ export async function fetchConfigSnapshot(): Promise<ConfigSnapshot> {
 
 export async function fetchConfigLogs(): Promise<ConfigLogEntry[]> {
   return fetchJson<ConfigLogEntry[]>("/api/config/logs");
+}
+
+export async function synthesizeRules(
+  body: SynthesizeRulesBody,
+): Promise<SynthesizeRulesResponse> {
+  return postJson<SynthesizeRulesResponse>("/api/rules/synthesize", body);
 }

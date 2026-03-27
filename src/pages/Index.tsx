@@ -15,13 +15,18 @@ import {
   LabelList,
 } from "recharts";
 import { Activity, Shield, Zap, Globe, Brain, AlertTriangle } from "lucide-react";
+import { ApiErrorAlert } from "@/components/ApiErrorAlert";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { ChartCard } from "@/components/dashboard/ChartCard";
 import { StatusIndicator } from "@/components/dashboard/StatusIndicator";
 import { Topbar } from "@/components/Topbar";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AttackLogEntry,
+  ConfigSnapshot,
   StatsSnapshot,
+  fetchConfigSnapshot,
   fetchHealthSnapshot,
   fetchRecentLogs,
   fetchStatsSnapshot,
@@ -49,6 +54,11 @@ function formatNumber(n: number): string {
 function toMinuteLabel(iso: string): string {
   const date = new Date(iso);
   return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+function isRateLimitDecision(decision: string): boolean {
+  const normalized = decision.replace(/[\s_-]/g, "").toLowerCase();
+  return normalized === "ratelimit";
 }
 
 function decisionLabel({ cx, cy, midAngle, outerRadius, payload, value }: any) {
@@ -133,36 +143,42 @@ export default function Index() {
   const [health, setHealth] = useState<{ ok: boolean; status: string; config_version: number } | null>(null);
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [logs, setLogs] = useState<AttackLogEntry[]>([]);
+  const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot | null>(null);
 
   const logSummary = useMemo(() => summarizeLogs(logs), [logs]);
 
   const derivedSummary = useMemo(() => {
+    const recentRateLimitedTotal = logs.filter((log) => isRateLimitDecision(log.decision)).length;
+
     if (!stats) {
       return {
         blockedPercent: 0,
         totalRequests: 0,
         blockedTotal: 0,
-        rateLimitedTotal: 0,
+        rateLimitedTotal: recentRateLimitedTotal,
         pipelineLayerCount: 0,
         healthyUpstreams: 0,
         totalUpstreams: 0,
+        rateLimitedSource: recentRateLimitedTotal > 0 ? "recent logs" : "runtime",
       };
     }
 
     const blockedPercent = stats.requests_total > 0
       ? +((stats.blocked_total / stats.requests_total) * 100).toFixed(2)
       : 0;
+    const rateLimitedTotal = Math.max(stats.rate_limited_total, recentRateLimitedTotal);
 
     return {
       blockedPercent,
       totalRequests: stats.requests_total,
       blockedTotal: stats.blocked_total,
-      rateLimitedTotal: stats.rate_limited_total,
+      rateLimitedTotal,
       pipelineLayerCount: stats.pipeline_layers.length,
       healthyUpstreams: stats.healthy_upstreams,
       totalUpstreams: stats.upstreams.filter((u) => u.enabled).length,
+      rateLimitedSource: recentRateLimitedTotal > stats.rate_limited_total ? "recent logs" : "runtime",
     };
-  }, [stats]);
+  }, [logs, stats]);
 
   const layerDurations = useMemo(
     () => (stats?.pipeline_layers || []).map((layer, index) => ({
@@ -212,10 +228,11 @@ export default function Index() {
 
     const load = async () => {
       try {
-        const [nextHealth, nextStats, nextLogs] = await Promise.all([
+        const [nextHealth, nextStats, nextLogs, nextConfig] = await Promise.all([
           fetchHealthSnapshot(),
           fetchStatsSnapshot(),
           fetchRecentLogs(),
+          fetchConfigSnapshot(),
         ]);
 
         if (!mounted) return;
@@ -223,6 +240,7 @@ export default function Index() {
         setHealth(nextHealth);
         setStats(nextStats);
         setLogs(nextLogs);
+        setConfigSnapshot(nextConfig);
         setError(null);
       } catch (err) {
         if (!mounted) return;
@@ -247,16 +265,18 @@ export default function Index() {
     <div className="min-h-screen bg-background">
       <Topbar />
       <div className="p-6">
-        {error && (
-          <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            Failed to load backend data: {error}
-          </div>
-        )}
+        {error && <ApiErrorAlert className="mb-6" title="Dashboard data unavailable" message={error} />}
 
         {/* Summary Cards */}
         <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
           <MetricCard title="Total Requests" value={formatNumber(derivedSummary.totalRequests)} icon={<Activity className="h-4 w-4" />} variant="success" />
-          <MetricCard title="Rate Limited" value={formatNumber(derivedSummary.rateLimitedTotal)} icon={<Zap className="h-4 w-4" />} variant="warning" />
+          <MetricCard
+            title="Rate Limited"
+            value={formatNumber(derivedSummary.rateLimitedTotal)}
+            icon={<Zap className="h-4 w-4" />}
+            subtitle={derivedSummary.rateLimitedSource}
+            variant="warning"
+          />
           <MetricCard title="Blocked %" value={`${derivedSummary.blockedPercent}%`} icon={<Shield className="h-4 w-4" />} />
           <MetricCard title="Config Version" value={health?.config_version || stats?.config_version || 0} icon={<Globe className="h-4 w-4" />} />
           <MetricCard title="ML Circuit" value={stats?.ml_circuit_state || "unknown"} icon={<Brain className="h-4 w-4" />} subtitle="control plane" />
@@ -268,6 +288,52 @@ export default function Index() {
             variant={upstreamVariant}
           />
         </div>
+
+      <div className="mb-6 grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg font-display">GPS Synthesis</CardTitle>
+            <CardDescription>Rule generation controls sourced from the current control-plane config.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={configSnapshot?.config?.gps?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                {configSnapshot?.config?.gps?.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+              <Badge variant="secondary" className="uppercase tracking-[0.15em]">
+                {configSnapshot?.config?.gps?.default_lookback_hours ?? "n/a"}h lookback
+              </Badge>
+            </div>
+            <p>Minimum malicious hits: {configSnapshot?.config?.gps?.min_hits ?? "n/a"}</p>
+            <p>Maximum synthesized rules: {configSnapshot?.config?.gps?.max_rules ?? "n/a"}</p>
+            <p>Use the Rules page to preview candidates and apply a generated ruleset.</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg font-display">Slack Alerting</CardTitle>
+            <CardDescription>Alert transport posture for recent request and config events.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={configSnapshot?.config?.slack?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                {configSnapshot?.config?.slack?.enabled ? "Enabled" : "Disabled"}
+              </Badge>
+              <Badge variant={configSnapshot?.config?.gateway?.tls?.enabled ? "secondary" : "outline"} className="uppercase tracking-[0.15em]">
+                {configSnapshot?.config?.gateway?.tls?.certbot?.enabled
+                  ? "HTTPS + Certbot"
+                  : configSnapshot?.config?.gateway?.tls?.enabled
+                    ? "HTTPS listener"
+                    : "HTTP listener"}
+              </Badge>
+            </div>
+            <p>Minimum severity: {configSnapshot?.config?.slack?.min_severity ?? "medium"}</p>
+            <p>Rate limits included: {configSnapshot?.config?.slack?.include_rate_limits ? "yes" : "no"}</p>
+            <p>Use the Logs page to inspect the derived Slack alert feed and sendability.</p>
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Row 1: Duration + Active Connections */}
       <div className="mb-6 grid gap-4 lg:grid-cols-2">

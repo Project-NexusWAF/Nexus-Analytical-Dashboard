@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import { BellRing, Send } from "lucide-react";
+import { ApiErrorAlert } from "@/components/ApiErrorAlert";
 import { Topbar } from "@/components/Topbar";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -7,11 +10,32 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   AttackLogEntry,
   ConfigLogEntry,
+  ConfigSnapshot,
   RuleVersion,
+  SlackSeverity,
   fetchConfigLogs,
+  fetchConfigSnapshot,
   fetchRecentLogs,
   fetchRuleVersions,
 } from "@/lib/control-api";
+
+interface AlertFeedItem {
+  id: string;
+  timestamp: string;
+  severity: SlackSeverity;
+  type: "request" | "system";
+  source: string;
+  title: string;
+  details: string;
+  sendable: boolean;
+}
+
+const severityOrder: Record<SlackSeverity, number> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+};
 
 function formatTimestamp(value: string) {
   const date = new Date(value);
@@ -26,11 +50,9 @@ function formatTimestamp(value: string) {
   });
 }
 
-function formatRisk(score: number) {
-  if (!Number.isFinite(score)) return "n/a";
-  const clamped = Math.max(0, Math.min(1, score));
-  const percent = (clamped * 100).toFixed(0);
-  return `${clamped.toFixed(2)} (${percent}%)`;
+function isRateLimitDecision(decision: string): boolean {
+  const normalized = decision.replace(/[\s_-]/g, "").toLowerCase();
+  return normalized === "ratelimit";
 }
 
 function decisionVariant(decision: string) {
@@ -48,10 +70,56 @@ function statusVariant(status: string) {
   return "secondary" as const;
 }
 
+function severityVariant(severity: SlackSeverity) {
+  if (severity === "critical" || severity === "high") return "destructive" as const;
+  if (severity === "medium") return "default" as const;
+  return "outline" as const;
+}
+
+function classifyRequestSeverity(log: AttackLogEntry): SlackSeverity {
+  if (log.block_code === "CommandInjection" || log.block_code === "SqlInjection") {
+    return "critical";
+  }
+  if (
+    log.block_code === "CrossSiteScripting" ||
+    log.block_code === "PathTraversal" ||
+    log.block_code === "MlDetectedThreat"
+  ) {
+    return "high";
+  }
+  if (
+    isRateLimitDecision(log.decision) ||
+    (log.threat_tags || []).some((tag) => tag.toLowerCase() === "anomaly")
+  ) {
+    return "medium";
+  }
+  return "low";
+}
+
+function classifySystemSeverity(entry: ConfigLogEntry): SlackSeverity {
+  return entry.status.toLowerCase() === "error" ? "high" : "low";
+}
+
+function wouldSlackSend(
+  severity: SlackSeverity,
+  configSnapshot: ConfigSnapshot | null,
+  options: { isRateLimit?: boolean } = {},
+) {
+  const slack = configSnapshot?.config?.slack;
+  if (!slack?.enabled) {
+    return false;
+  }
+  if (options.isRateLimit && !slack.include_rate_limits) {
+    return false;
+  }
+  return severityOrder[severity] >= severityOrder[slack.min_severity];
+}
+
 export default function Logs() {
   const [attackLogs, setAttackLogs] = useState<AttackLogEntry[]>([]);
   const [ruleVersions, setRuleVersions] = useState<RuleVersion[]>([]);
   const [configLogs, setConfigLogs] = useState<ConfigLogEntry[]>([]);
+  const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,15 +128,17 @@ export default function Logs() {
 
     const load = async () => {
       try {
-        const [attack, rules, configs] = await Promise.all([
+        const [attack, rules, configs, config] = await Promise.all([
           fetchRecentLogs(200),
           fetchRuleVersions(),
           fetchConfigLogs(),
+          fetchConfigSnapshot(),
         ]);
         if (!mounted) return;
         setAttackLogs(attack);
         setRuleVersions(rules);
         setConfigLogs(configs);
+        setConfigSnapshot(config);
         setError(null);
       } catch (err) {
         if (!mounted) return;
@@ -98,15 +168,61 @@ export default function Logs() {
     [ruleVersions],
   );
 
+  const alertFeed = useMemo(() => {
+    const requestAlerts: AlertFeedItem[] = attackLogs.map((log) => {
+      const severity = classifyRequestSeverity(log);
+      const blockedBy = log.blocked_by || log.block_code || "gateway";
+      const tags = log.threat_tags.length ? `Tags: ${log.threat_tags.join(", ")}` : "No tags";
+      return {
+        id: log.id,
+        timestamp: log.timestamp,
+        severity,
+        type: "request",
+        source: blockedBy,
+        title: `${log.decision} ${log.method} ${log.uri}`,
+        details: `${log.client_ip} · ${tags}`,
+        sendable: wouldSlackSend(severity, configSnapshot, {
+          isRateLimit: isRateLimitDecision(log.decision),
+        }),
+      };
+    });
+
+    const systemAlerts: AlertFeedItem[] = sortedConfigLogs.map((entry, index) => {
+      const severity = classifySystemSeverity(entry);
+      return {
+        id: `${entry.timestamp}-${index}`,
+        timestamp: entry.timestamp,
+        severity,
+        type: "system",
+        source: "config_reload",
+        title: entry.status.toLowerCase() === "error" ? "Config Reload Failed" : "Config Reload Applied",
+        details: entry.message,
+        sendable: wouldSlackSend(severity, configSnapshot),
+      };
+    });
+
+    return [...requestAlerts, ...systemAlerts].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [attackLogs, configSnapshot, sortedConfigLogs]);
+
+  const sendableAlertCount = useMemo(
+    () => alertFeed.filter((item) => item.sendable).length,
+    [alertFeed],
+  );
+
+  const highestSeverity = useMemo(() => {
+    if (alertFeed.some((item) => item.severity === "critical")) return "critical";
+    if (alertFeed.some((item) => item.severity === "high")) return "high";
+    if (alertFeed.some((item) => item.severity === "medium")) return "medium";
+    return "low";
+  }, [alertFeed]);
+
+  const slackConfig = configSnapshot?.config?.slack;
+
   return (
     <div className="min-h-screen bg-background">
       <Topbar />
       <div className="p-6">
-        {error && (
-          <div className="mb-6 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            Failed to load log data: {error}
-          </div>
-        )}
+        {error && <ApiErrorAlert className="mb-6" title="Log streams unavailable" message={error} />}
 
         <Tabs defaultValue="attack">
           <TabsList className="bg-secondary/60">
@@ -118,6 +234,9 @@ export default function Logs() {
             </TabsTrigger>
             <TabsTrigger value="config" className="text-xs uppercase tracking-[0.2em]">
               Config Logs
+            </TabsTrigger>
+            <TabsTrigger value="alerts" className="text-xs uppercase tracking-[0.2em]">
+              Alerts
             </TabsTrigger>
           </TabsList>
 
@@ -139,7 +258,6 @@ export default function Logs() {
                         <TableHead>Method</TableHead>
                         <TableHead>URI</TableHead>
                         <TableHead>Decision</TableHead>
-                        <TableHead>Risk</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -154,7 +272,6 @@ export default function Logs() {
                               {log.decision}
                             </Badge>
                           </TableCell>
-                          <TableCell className="text-xs">{formatRisk(log.risk_score)}</TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -238,6 +355,140 @@ export default function Logs() {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="alerts">
+            <div className="flex flex-col gap-6">
+              <div className="grid gap-4 lg:grid-cols-3">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-lg font-display">
+                      <BellRing />
+                      Slack Alerting
+                    </CardTitle>
+                    <CardDescription>Current alert transport settings from the active config snapshot.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={slackConfig?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                        {slackConfig?.enabled ? "Enabled" : "Disabled"}
+                      </Badge>
+                      <Badge variant={slackConfig?.webhook_url ? "secondary" : "outline"} className="uppercase tracking-[0.15em]">
+                        {slackConfig?.webhook_url ? "Webhook Configured" : "Webhook Missing"}
+                      </Badge>
+                    </div>
+                    <p>Channel: {slackConfig?.channel || "default webhook channel"}</p>
+                    <p>Username: {slackConfig?.username || "NexusWAF"}</p>
+                    <p>Icon: {slackConfig?.icon_emoji || ":shield:"}</p>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-lg font-display">
+                      <Send />
+                      Delivery Policy
+                    </CardTitle>
+                    <CardDescription>How the current Slack policy filters recent request and system events.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={severityVariant(slackConfig?.min_severity || "medium")} className="uppercase tracking-[0.15em]">
+                        Min severity: {slackConfig?.min_severity || "medium"}
+                      </Badge>
+                      <Badge variant={slackConfig?.include_rate_limits ? "secondary" : "outline"} className="uppercase tracking-[0.15em]">
+                        {slackConfig?.include_rate_limits ? "Rate Limits Included" : "Rate Limits Ignored"}
+                      </Badge>
+                    </div>
+                    <p>Recent alert candidates: {alertFeed.length}</p>
+                    <p>Would send right now: {sendableAlertCount}</p>
+                    <p>TLS listener: {configSnapshot?.config?.gateway?.tls?.enabled ? "HTTPS enabled" : "HTTP only"}</p>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-lg font-display">Recent Signal</CardTitle>
+                    <CardDescription>A quick read on what the alerting pipeline is seeing in the current dashboard window.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={severityVariant(highestSeverity)} className="uppercase tracking-[0.15em]">
+                        Highest severity: {highestSeverity}
+                      </Badge>
+                      <Badge variant={sendableAlertCount > 0 ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                        {sendableAlertCount > 0 ? "Active Alert Flow" : "Quiet Window"}
+                      </Badge>
+                    </div>
+                    <p>Attack log events: {attackLogs.length}</p>
+                    <p>System reload events: {sortedConfigLogs.length}</p>
+                    <p>Sendable share: {alertFeed.length > 0 ? `${Math.round((sendableAlertCount / alertFeed.length) * 100)}%` : "0%"}</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Alert>
+                <BellRing />
+                <AlertTitle>Derived alert stream</AlertTitle>
+                <AlertDescription>
+                  This feed shows what the current Slack policy would send based on recent attack logs and config reload events. Delivery receipts are not persisted by the backend yet.
+                </AlertDescription>
+              </Alert>
+
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg font-display">Recent Alert Candidates</CardTitle>
+                  <CardDescription>Request and system events ranked by the same severity model the Slack notifier uses.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {alertFeed.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No alert candidates available in the current lookback window.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Time</TableHead>
+                          <TableHead>Severity</TableHead>
+                          <TableHead>Type</TableHead>
+                          <TableHead>Would Send</TableHead>
+                          <TableHead>Source</TableHead>
+                          <TableHead>Summary</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {alertFeed.map((item) => (
+                          <TableRow key={item.id}>
+                            <TableCell className="font-display text-xs">{formatTimestamp(item.timestamp)}</TableCell>
+                            <TableCell>
+                              <Badge variant={severityVariant(item.severity)} className="text-[10px] uppercase tracking-[0.15em]">
+                                {item.severity}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="text-[10px] uppercase tracking-[0.15em]">
+                                {item.type}
+                              </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant={item.sendable ? "default" : "outline"} className="text-[10px] uppercase tracking-[0.15em]">
+                                {item.sendable ? "Yes" : "No"}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">{item.source}</TableCell>
+                            <TableCell className="max-w-[440px]">
+                              <div className="flex flex-col gap-1">
+                                <span className="text-xs font-medium text-foreground">{item.title}</span>
+                                <span className="truncate text-xs text-muted-foreground">{item.details}</span>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           </TabsContent>
         </Tabs>
 
