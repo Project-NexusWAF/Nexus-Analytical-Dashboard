@@ -1,10 +1,11 @@
-import { Activity, ScrollText, Settings, Shield } from "lucide-react";
+import { Activity, Bot, ScrollText, Settings, Shield } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", icon: Activity },
   { to: "/logs", label: "Logs", icon: ScrollText },
+  { to: "/policy", label: "Policy", icon: Bot },
   { to: "/rules", label: "Rules", icon: Shield },
   { to: "/config", label: "Config", icon: Settings },
 ] as const;

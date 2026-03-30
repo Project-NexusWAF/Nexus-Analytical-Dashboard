@@ -15,6 +15,48 @@ export interface StatsSnapshot {
   upstreams: UpstreamStatusView[];
 }
 
+export interface PolicyServiceSnapshot {
+  enabled: boolean;
+  endpoint: string;
+  status: string;
+  model: string;
+  feedback_events_total: number;
+  replay_size: number;
+  last_loss: number;
+  online_training_enabled: boolean;
+}
+
+export interface PolicyFeedbackEntry {
+  request_id: string;
+  unix_time_ms: number;
+  policy_action_name: string;
+  final_decision: string;
+  decided_by: string;
+  reward: number;
+  method: string;
+  uri: string;
+  block_code: string;
+  rate_limited: boolean;
+}
+
+export interface PolicyFeedbackPayload {
+  events: PolicyFeedbackEntry[];
+}
+
+export interface ManualTrainBody {
+  gradient_updates?: number;
+  replay_from_log_limit?: number;
+}
+
+export interface ManualTrainResponse {
+  accepted: boolean;
+  message: string;
+  updates_run: number;
+  replay_size: number;
+  last_loss: number;
+  checkpoint_saved: boolean;
+}
+
 export interface UpstreamStatusView {
   name: string;
   addr: string;
@@ -229,6 +271,21 @@ export async function fetchConfigSnapshot(): Promise<ConfigSnapshot> {
 
 export async function fetchConfigLogs(): Promise<ConfigLogEntry[]> {
   return fetchJson<ConfigLogEntry[]>("/api/config/logs");
+}
+
+export async function fetchPolicyServiceSnapshot(): Promise<PolicyServiceSnapshot> {
+  return fetchJson<PolicyServiceSnapshot>("/api/policy");
+}
+
+export async function fetchPolicyFeedbackEvents(limit = 20): Promise<PolicyFeedbackEntry[]> {
+  const payload = await fetchJson<PolicyFeedbackPayload>(`/api/policy/events?limit=${limit}`);
+  return payload.events;
+}
+
+export async function triggerManualPolicyTrain(
+  body: ManualTrainBody,
+): Promise<ManualTrainResponse> {
+  return postJson<ManualTrainResponse>("/api/policy/train", body);
 }
 
 export async function synthesizeRules(

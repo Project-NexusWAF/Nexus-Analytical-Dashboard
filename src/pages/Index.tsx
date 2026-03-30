@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AreaChart,
   Area,
@@ -14,7 +14,15 @@ import {
   Pie,
   LabelList,
 } from "recharts";
-import { Activity, Shield, Zap, Globe, Brain, AlertTriangle } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Bot,
+  Brain,
+  Globe,
+  Shield,
+  Zap,
+} from "lucide-react";
 import { ApiErrorAlert } from "@/components/ApiErrorAlert";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { ChartCard } from "@/components/dashboard/ChartCard";
@@ -25,9 +33,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import {
   AttackLogEntry,
   ConfigSnapshot,
+  PolicyServiceSnapshot,
   StatsSnapshot,
   fetchConfigSnapshot,
   fetchHealthSnapshot,
+  fetchPolicyServiceSnapshot,
   fetchRecentLogs,
   fetchStatsSnapshot,
 } from "@/lib/control-api";
@@ -59,6 +69,14 @@ function toMinuteLabel(iso: string): string {
 function isRateLimitDecision(decision: string): boolean {
   const normalized = decision.replace(/[\s_-]/g, "").toLowerCase();
   return normalized === "ratelimit";
+}
+
+function metricVariantForStatus(status: string): "default" | "success" | "warning" | "danger" {
+  const normalized = status.toLowerCase();
+  if (normalized.includes("healthy") || normalized === "ready" || normalized === "enabled") return "success";
+  if (normalized.includes("disabled") || normalized.includes("starting")) return "default";
+  if (normalized.includes("unreachable") || normalized.includes("unhealthy") || normalized.includes("error")) return "danger";
+  return "warning";
 }
 
 function decisionLabel({ cx, cy, midAngle, outerRadius, payload, value }: any) {
@@ -144,6 +162,7 @@ export default function Index() {
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [logs, setLogs] = useState<AttackLogEntry[]>([]);
   const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot | null>(null);
+  const [policySnapshot, setPolicySnapshot] = useState<PolicyServiceSnapshot | null>(null);
 
   const logSummary = useMemo(() => summarizeLogs(logs), [logs]);
 
@@ -187,7 +206,7 @@ export default function Index() {
       p95: +(2 + index * 0.8).toFixed(1),
       p99: +(4 + index * 1.4).toFixed(1),
     })),
-    [stats]
+    [stats],
   );
 
   const upstreams = useMemo(
@@ -198,16 +217,16 @@ export default function Index() {
           normalized === "healthy"
             ? "healthy"
             : normalized === "unhealthy"
-            ? "unhealthy"
-            : normalized === "disabled"
-            ? "disabled"
-            : "unknown";
+              ? "unhealthy"
+              : normalized === "disabled"
+                ? "disabled"
+                : "unknown";
         return {
           upstream: u.name || u.addr,
           status,
         };
       }),
-    [stats]
+    [stats],
   );
 
   const upstreamVariant =
@@ -215,32 +234,37 @@ export default function Index() {
     derivedSummary.healthyUpstreams === derivedSummary.totalUpstreams
       ? "success"
       : derivedSummary.totalUpstreams > 0
-      ? "warning"
-      : "default";
+        ? "warning"
+        : "default";
 
   const upstreamValue =
     derivedSummary.totalUpstreams > 0
       ? `${derivedSummary.healthyUpstreams}/${derivedSummary.totalUpstreams}`
       : `${derivedSummary.healthyUpstreams}`;
 
+  const loadDashboard = useCallback(async () => {
+    const [nextHealth, nextStats, nextLogs, nextConfig, nextPolicy] = await Promise.all([
+      fetchHealthSnapshot(),
+      fetchStatsSnapshot(),
+      fetchRecentLogs(),
+      fetchConfigSnapshot(),
+      fetchPolicyServiceSnapshot(),
+    ]);
+
+    setHealth(nextHealth);
+    setStats(nextStats);
+    setLogs(nextLogs);
+    setConfigSnapshot(nextConfig);
+    setPolicySnapshot(nextPolicy);
+  }, []);
+
   useEffect(() => {
     let mounted = true;
 
     const load = async () => {
       try {
-        const [nextHealth, nextStats, nextLogs, nextConfig] = await Promise.all([
-          fetchHealthSnapshot(),
-          fetchStatsSnapshot(),
-          fetchRecentLogs(),
-          fetchConfigSnapshot(),
-        ]);
-
+        await loadDashboard();
         if (!mounted) return;
-
-        setHealth(nextHealth);
-        setStats(nextStats);
-        setLogs(nextLogs);
-        setConfigSnapshot(nextConfig);
         setError(null);
       } catch (err) {
         if (!mounted) return;
@@ -259,7 +283,7 @@ export default function Index() {
       mounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [loadDashboard]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -267,8 +291,7 @@ export default function Index() {
       <div className="p-6">
         {error && <ApiErrorAlert className="mb-6" title="Dashboard data unavailable" message={error} />}
 
-        {/* Summary Cards */}
-        <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+        <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-7">
           <MetricCard title="Total Requests" value={formatNumber(derivedSummary.totalRequests)} icon={<Activity className="h-4 w-4" />} variant="success" />
           <MetricCard
             title="Rate Limited"
@@ -279,7 +302,20 @@ export default function Index() {
           />
           <MetricCard title="Blocked %" value={`${derivedSummary.blockedPercent}%`} icon={<Shield className="h-4 w-4" />} />
           <MetricCard title="Config Version" value={health?.config_version || stats?.config_version || 0} icon={<Globe className="h-4 w-4" />} />
-          <MetricCard title="ML Circuit" value={stats?.ml_circuit_state || "unknown"} icon={<Brain className="h-4 w-4" />} subtitle="control plane" />
+          <MetricCard
+            title="Policy Service"
+            value={policySnapshot?.status || "unknown"}
+            subtitle={policySnapshot?.enabled ? "rl agent" : "disabled in config"}
+            icon={<Bot className="h-4 w-4" />}
+            variant={metricVariantForStatus(policySnapshot?.status || "unknown")}
+          />
+          <MetricCard
+            title="ML Circuit"
+            value={stats?.ml_circuit_state || "unknown"}
+            subtitle="semantic classifier"
+            icon={<Brain className="h-4 w-4" />}
+            variant={metricVariantForStatus(stats?.ml_circuit_state || "unknown")}
+          />
           <MetricCard
             title="Upstreams"
             value={upstreamValue}
@@ -289,232 +325,228 @@ export default function Index() {
           />
         </div>
 
-      <div className="mb-6 grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg font-display">GPS Synthesis</CardTitle>
-            <CardDescription>Rule generation controls sourced from the current control-plane config.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={configSnapshot?.config?.gps?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
-                {configSnapshot?.config?.gps?.enabled ? "Enabled" : "Disabled"}
-              </Badge>
-              <Badge variant="secondary" className="uppercase tracking-[0.15em]">
-                {configSnapshot?.config?.gps?.default_lookback_hours ?? "n/a"}h lookback
-              </Badge>
-            </div>
-            <p>Minimum malicious hits: {configSnapshot?.config?.gps?.min_hits ?? "n/a"}</p>
-            <p>Maximum synthesized rules: {configSnapshot?.config?.gps?.max_rules ?? "n/a"}</p>
-            <p>Use the Rules page to preview candidates and apply a generated ruleset.</p>
-          </CardContent>
-        </Card>
+        <div className="mb-6 grid gap-4 xl:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg font-display">GPS Synthesis</CardTitle>
+              <CardDescription>Rule generation controls sourced from the current control-plane config.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={configSnapshot?.config?.gps?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                  {configSnapshot?.config?.gps?.enabled ? "Enabled" : "Disabled"}
+                </Badge>
+                <Badge variant="secondary" className="uppercase tracking-[0.15em]">
+                  {configSnapshot?.config?.gps?.default_lookback_hours ?? "n/a"}h lookback
+                </Badge>
+              </div>
+              <p>Minimum malicious hits: {configSnapshot?.config?.gps?.min_hits ?? "n/a"}</p>
+              <p>Maximum synthesized rules: {configSnapshot?.config?.gps?.max_rules ?? "n/a"}</p>
+              <p>Use the Rules page to preview candidates and apply a generated ruleset.</p>
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg font-display">Slack Alerting</CardTitle>
-            <CardDescription>Alert transport posture for recent request and config events.</CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge variant={configSnapshot?.config?.slack?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
-                {configSnapshot?.config?.slack?.enabled ? "Enabled" : "Disabled"}
-              </Badge>
-              <Badge variant={configSnapshot?.config?.gateway?.tls?.enabled ? "secondary" : "outline"} className="uppercase tracking-[0.15em]">
-                {configSnapshot?.config?.gateway?.tls?.certbot?.enabled
-                  ? "HTTPS + Certbot"
-                  : configSnapshot?.config?.gateway?.tls?.enabled
-                    ? "HTTPS listener"
-                    : "HTTP listener"}
-              </Badge>
-            </div>
-            <p>Minimum severity: {configSnapshot?.config?.slack?.min_severity ?? "medium"}</p>
-            <p>Rate limits included: {configSnapshot?.config?.slack?.include_rate_limits ? "yes" : "no"}</p>
-            <p>Use the Logs page to inspect the derived Slack alert feed and sendability.</p>
-          </CardContent>
-        </Card>
-      </div>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg font-display">Slack Alerting</CardTitle>
+              <CardDescription>Alert transport posture for recent request and config events.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={configSnapshot?.config?.slack?.enabled ? "default" : "outline"} className="uppercase tracking-[0.15em]">
+                  {configSnapshot?.config?.slack?.enabled ? "Enabled" : "Disabled"}
+                </Badge>
+                <Badge variant={configSnapshot?.config?.gateway?.tls?.enabled ? "secondary" : "outline"} className="uppercase tracking-[0.15em]">
+                  {configSnapshot?.config?.gateway?.tls?.certbot?.enabled
+                    ? "HTTPS + Certbot"
+                    : configSnapshot?.config?.gateway?.tls?.enabled
+                      ? "HTTPS listener"
+                      : "HTTP listener"}
+                </Badge>
+              </div>
+              <p>Minimum severity: {configSnapshot?.config?.slack?.min_severity ?? "medium"}</p>
+              <p>Rate limits included: {configSnapshot?.config?.slack?.include_rate_limits ? "yes" : "no"}</p>
+              <p>Use the Logs page to inspect the derived Slack alert feed and sendability.</p>
+            </CardContent>
+          </Card>
+        </div>
 
-      {/* Row 1: Duration + Active Connections */}
-      <div className="mb-6 grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Request Volume" subtitle="Requests per minute from attack logs">
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={logSummary.requestsSeries}>
-              <defs>
-                <linearGradient id="durationGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(160, 70%, 45%)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="hsl(160, 70%, 45%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
-              <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <Tooltip {...tooltipStyle} />
-              <Area type="monotone" dataKey="value" stroke="hsl(160, 70%, 45%)" fill="url(#durationGrad)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartCard>
+        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="Request Volume" subtitle="Requests per minute from attack logs">
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={logSummary.requestsSeries}>
+                <defs>
+                  <linearGradient id="durationGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(160, 70%, 45%)" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="hsl(160, 70%, 45%)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <Tooltip {...tooltipStyle} />
+                <Area type="monotone" dataKey="value" stroke="hsl(160, 70%, 45%)" fill="url(#durationGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartCard>
 
-        <ChartCard title="ML-Scored Requests" subtitle="Requests per minute where ML score exists">
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={logSummary.mlSeries}>
-              <defs>
-                <linearGradient id="connGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(200, 80%, 55%)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="hsl(200, 80%, 55%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
-              <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <Tooltip {...tooltipStyle} />
-              <Area type="monotone" dataKey="value" stroke="hsl(200, 80%, 55%)" fill="url(#connGrad)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartCard>
-      </div>
+          <ChartCard title="ML-Scored Requests" subtitle="Requests per minute where ML score exists">
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart data={logSummary.mlSeries}>
+                <defs>
+                  <linearGradient id="connGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(200, 80%, 55%)" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="hsl(200, 80%, 55%)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <Tooltip {...tooltipStyle} />
+                <Area type="monotone" dataKey="value" stroke="hsl(200, 80%, 55%)" fill="url(#connGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
 
-      {/* Row 2: Blocked Requests + Requests by Status */}
-      <div className="mb-6 grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Blocked Requests" subtitle="By block reason from logs">
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={logSummary.blocked} layout="vertical" margin={{ left: 4, right: 40 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
-              <XAxis type="number" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <YAxis dataKey="reason" type="category" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} width={120} />
-              <Tooltip {...tooltipStyle} />
-              <Bar
-                dataKey="count"
-                radius={[0, 6, 6, 0]}
-                barSize={16}
-                background={{ fill: "hsl(220, 12%, 12%)" }}
-              >
-                {logSummary.blocked.map((_, i) => (
-                  <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                ))}
-                <LabelList
+        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="Blocked Requests" subtitle="By block reason from logs">
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={logSummary.blocked} layout="vertical" margin={{ left: 4, right: 40 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <YAxis dataKey="reason" type="category" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} width={120} />
+                <Tooltip {...tooltipStyle} />
+                <Bar
                   dataKey="count"
-                  position="right"
-                  formatter={(value: number) => formatNumber(value)}
-                  fill={chartLabelColor}
-                  fontSize={10}
-                  fontFamily="JetBrains Mono"
-                />
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartCard>
+                  radius={[0, 6, 6, 0]}
+                  barSize={16}
+                  background={{ fill: "hsl(220, 12%, 12%)" }}
+                >
+                  {logSummary.blocked.map((_, i) => (
+                    <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                  ))}
+                  <LabelList
+                    dataKey="count"
+                    position="right"
+                    formatter={(value: number) => formatNumber(value)}
+                    fill={chartLabelColor}
+                    fontSize={10}
+                    fontFamily="JetBrains Mono"
+                  />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartCard>
 
-        <ChartCard title="Requests by Decision" subtitle="Distribution across gateway decisions">
-          <ResponsiveContainer width="100%" height={220}>
-            <PieChart>
-              <Pie
-                data={logSummary.decisions}
-                dataKey="count"
-                nameKey="status"
-                cx="50%"
-                cy="50%"
-                innerRadius={50}
-                outerRadius={78}
-                paddingAngle={2}
-                strokeWidth={0}
-                labelLine={{ stroke: "hsl(210, 15%, 55%)" }}
-                label={decisionLabel}
+          <ChartCard title="Requests by Decision" subtitle="Distribution across gateway decisions">
+            <ResponsiveContainer width="100%" height={220}>
+              <PieChart>
+                <Pie
+                  data={logSummary.decisions}
+                  dataKey="count"
+                  nameKey="status"
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={50}
+                  outerRadius={78}
+                  paddingAngle={2}
+                  strokeWidth={0}
+                  labelLine={{ stroke: "hsl(210, 15%, 55%)" }}
+                  label={decisionLabel}
+                >
+                  {logSummary.decisions.map((_, i) => (
+                    <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip {...tooltipStyle} />
+              </PieChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
+
+        <div className="mb-6 grid gap-4 lg:grid-cols-2">
+          <ChartCard title="Pipeline Layers" subtitle="Layer lineup from backend config">
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={layerDurations}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
+                <XAxis dataKey="layer" tick={{ fontSize: 9, fill: "hsl(215, 15%, 50%)" }} angle={-20} textAnchor="end" height={50} />
+                <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <Tooltip {...tooltipStyle} />
+                <Bar dataKey="p50" fill="hsl(160, 70%, 45%)" radius={[2, 2, 0, 0]} />
+                <Bar dataKey="p95" fill="hsl(200, 80%, 55%)" radius={[2, 2, 0, 0]} />
+                <Bar dataKey="p99" fill="hsl(280, 65%, 60%)" radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartCard>
+
+          <ChartCard title="Control Health" subtitle="Control plane, policy link, and log availability">
+            <ResponsiveContainer width="100%" height={220}>
+              <AreaChart
+                data={[
+                  { time: "config", value: health?.ok ? 1 : 0 },
+                  { time: "policy", value: policySnapshot?.status?.toLowerCase().includes("healthy") ? 1 : 0 },
+                  { time: "logs", value: logs.length > 0 ? 1 : 0 },
+                ]}
               >
-                {logSummary.decisions.map((_, i) => (
-                  <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip {...tooltipStyle} />
-            </PieChart>
-          </ResponsiveContainer>
-        </ChartCard>
-      </div>
+                <defs>
+                  <linearGradient id="mlGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="hsl(280, 65%, 60%)" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="hsl(280, 65%, 60%)" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
+                <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
+                <Tooltip {...tooltipStyle} />
+                <Area type="monotone" dataKey="value" stroke="hsl(280, 65%, 60%)" fill="url(#mlGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartCard>
+        </div>
 
-      {/* Row 3: Layer Durations + ML Inference */}
-      <div className="mb-6 grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Pipeline Layers" subtitle="Layer lineup from backend config">
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={layerDurations}>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
-              <XAxis dataKey="layer" tick={{ fontSize: 9, fill: "hsl(215, 15%, 50%)" }} angle={-20} textAnchor="end" height={50} />
-              <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <Tooltip {...tooltipStyle} />
-              <Bar dataKey="p50" fill="hsl(160, 70%, 45%)" radius={[2, 2, 0, 0]} />
-              <Bar dataKey="p95" fill="hsl(200, 80%, 55%)" radius={[2, 2, 0, 0]} />
-              <Bar dataKey="p99" fill="hsl(280, 65%, 60%)" radius={[2, 2, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartCard>
+        <div className="mb-6 grid gap-4 lg:grid-cols-3">
+          <ChartCard title="Upstream Health" subtitle="Service status and latency">
+            <div className="space-y-2">
+              {upstreams.map((u) => (
+                <StatusIndicator key={u.upstream} name={u.upstream} status={u.status} />
+              ))}
+              {!upstreams.length && <p className="text-sm text-muted-foreground">No upstream status available</p>}
+            </div>
+          </ChartCard>
 
-        <ChartCard title="Config Health" subtitle="Control plane status snapshots">
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart
-              data={[
-                { time: "config", value: health?.ok ? 1 : 0 },
-                { time: "rules", value: stats ? 1 : 0 },
-                { time: "logs", value: logs.length > 0 ? 1 : 0 },
-              ]}
-            >
-              <defs>
-                <linearGradient id="mlGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(280, 65%, 60%)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="hsl(280, 65%, 60%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220, 14%, 18%)" />
-              <XAxis dataKey="time" tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <YAxis tick={{ fontSize: 10, fill: "hsl(215, 15%, 50%)" }} />
-              <Tooltip {...tooltipStyle} />
-              <Area type="monotone" dataKey="value" stroke="hsl(280, 65%, 60%)" fill="url(#mlGrad)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartCard>
-      </div>
-
-      {/* Row 4: Upstreams + Rate Limited + Rule Matches */}
-      <div className="mb-6 grid gap-4 lg:grid-cols-3">
-        <ChartCard title="Upstream Health" subtitle="Service status and latency">
-          <div className="space-y-2">
-            {upstreams.map((u) => (
-              <StatusIndicator key={u.upstream} name={u.upstream} status={u.status} />
-            ))}
-            {!upstreams.length && <p className="text-sm text-muted-foreground">No upstream status available</p>}
-          </div>
-        </ChartCard>
-
-        <ChartCard title="Top IPs" subtitle="Highest request volume in recent logs">
-          <div className="space-y-2">
-            {logSummary.topIps.map((r) => (
-              <div key={r.client_ip} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-3 py-2">
-                <span className="text-sm font-display text-card-foreground">{r.client_ip}</span>
-                <span className="rounded bg-destructive/10 px-2 py-0.5 text-xs font-bold font-display text-destructive">{formatNumber(r.count)}</span>
-              </div>
-            ))}
-            {!logSummary.topIps.length && <p className="text-sm text-muted-foreground">No IP data in logs</p>}
-          </div>
-        </ChartCard>
-
-        <ChartCard title="Threat Tags" subtitle="Most frequent tags extracted from logs">
-          <div className="space-y-2">
-            {logSummary.topTags.map((r) => (
-              <div key={r.rule_id} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-display text-card-foreground">{r.rule_id}</span>
-                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-display uppercase ${r.action === "block" ? "bg-destructive/10 text-destructive" :
-                    r.action === "challenge" ? "bg-warning/10 text-warning" :
-                      "bg-info/10 text-info"
-                    }`}>{r.action}</span>
+          <ChartCard title="Top IPs" subtitle="Highest request volume in recent logs">
+            <div className="space-y-2">
+              {logSummary.topIps.map((r) => (
+                <div key={r.client_ip} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-3 py-2">
+                  <span className="text-sm font-display text-card-foreground">{r.client_ip}</span>
+                  <span className="rounded bg-destructive/10 px-2 py-0.5 text-xs font-bold font-display text-destructive">{formatNumber(r.count)}</span>
                 </div>
-                <span className="text-xs font-display text-muted-foreground">{formatNumber(r.count)}</span>
-              </div>
-            ))}
-            {!logSummary.topTags.length && <p className="text-sm text-muted-foreground">No threat tag data available</p>}
-          </div>
-        </ChartCard>
-      </div>
+              ))}
+              {!logSummary.topIps.length && <p className="text-sm text-muted-foreground">No IP data in logs</p>}
+            </div>
+          </ChartCard>
 
-      {loading && <p className="text-sm text-muted-foreground">Loading backend metrics...</p>}
+          <ChartCard title="Threat Tags" subtitle="Most frequent tags extracted from logs">
+            <div className="space-y-2">
+              {logSummary.topTags.map((r) => (
+                <div key={r.rule_id} className="flex items-center justify-between rounded-md border border-border bg-secondary/30 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-display text-card-foreground">{r.rule_id}</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold font-display uppercase ${r.action === "block" ? "bg-destructive/10 text-destructive" :
+                      r.action === "challenge" ? "bg-warning/10 text-warning" :
+                        "bg-info/10 text-info"
+                      }`}>{r.action}</span>
+                  </div>
+                  <span className="text-xs font-display text-muted-foreground">{formatNumber(r.count)}</span>
+                </div>
+              ))}
+              {!logSummary.topTags.length && <p className="text-sm text-muted-foreground">No threat tag data available</p>}
+            </div>
+          </ChartCard>
+        </div>
+
+        {loading && <p className="text-sm text-muted-foreground">Loading backend metrics...</p>}
       </div>
     </div>
   );

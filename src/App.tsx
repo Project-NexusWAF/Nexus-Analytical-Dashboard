@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Index from "./pages/Index";
 import Logs from "./pages/Logs";
 import NotFound from "./pages/NotFound";
+import Policy from "./pages/Policy";
 import Rules from "./pages/Rules";
 import Config from "./pages/Config";
 
@@ -20,6 +21,7 @@ const App = () => (
         <Routes>
           <Route path="/" element={<Index />} />
           <Route path="/logs" element={<Logs />} />
+          <Route path="/policy" element={<Policy />} />
           <Route path="/rules" element={<Rules />} />
           <Route path="/config" element={<Config />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
